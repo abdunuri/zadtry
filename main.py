@@ -163,7 +163,7 @@ def restore_from_csv(conn):
             return
         
         cursor = conn.cursor()
-        with open('customers_backup.csv', 'r', encoding='utf-8') as csvfile:
+        with open('/data/backups/customers_backup.csv', 'r', encoding='utf-8') as csvfile:
             reader = csv.DictReader(csvfile)
             for row in reader:
                 cursor.execute('''
