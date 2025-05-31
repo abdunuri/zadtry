@@ -6,6 +6,7 @@ import os
 from dotenv import load_dotenv
 import sqlite3
 import datetime
+import tempfile
 from PIL import Image, ImageDraw, ImageFont
 import telegram
 import io
@@ -136,6 +137,78 @@ def setup_database():
         if 'conn' in locals():
             conn.close()
             logger.info("Database connection closed")
+
+async def import_customers(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Start the process of importing customers via CSV."""
+    user_id = update.message.from_user.id
+    if not has_full_permission(user_id):
+        await safe_reply(update, context, "ይህን ትዕዛዝ ለመጠቀም ፍቃድ የለዎትም።")
+        return ConversationHandler.END
+    
+    await safe_reply(update, context, "እባክዎ ደንበኞችን ለመጨመር የCSV ፋይል ይላኩ። ፋይሉ መግቢያዎች መኖር አለባቸው፡ 'name', 'phone', 'address'።")
+    return IMPORT_CSV
+
+async def handle_csv_import(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Process the uploaded CSV file and import customers into the database."""
+    if not update.message.document or not update.message.document.file_name.endswith('.csv'):
+        await safe_reply(update, context, "እባክዎ ትክክለኛ CSV ፋይል ይላኩ።")
+        return IMPORT_CSV
+    
+    try:
+        file = await update.message.document.get_file()
+        file_path = os.path.join(tempfile.gettempdir(), update.message.document.file_name)
+        
+        # Download the file
+        await file.download_to_drive(file_path)
+        
+        conn = sqlite3.connect('zad.db', check_same_thread=False)
+        cursor = conn.cursor()
+        
+        inserted_count = 0
+        with open(file_path, 'r', encoding='utf-8') as csvfile:
+            reader = csv.DictReader(csvfile)
+            
+            # Validate CSV headers
+            required_headers = {'name', 'phone', 'address'}
+            if not required_headers.issubset(reader.fieldnames):
+                await safe_reply(update, context, "CSV ፋይሉ መግቢያዎች መኖር አለባቸው፡ 'name', 'phone', 'address'።")
+                return ConversationHandler.END
+            
+            for row in reader:
+                try:
+                    cursor.execute('''
+                        INSERT INTO customers (name, phone, address, is_active)
+                        VALUES (?, ?, ?, 1)
+                    ''', (row['name'], row['phone'], row['address']))
+                    inserted_count += 1
+                except Exception as e:
+                    logger.error(f"Error inserting customer {row}: {e}")
+                    continue  # Skip invalid rows
+            
+            conn.commit()
+        
+        # Clean up the temporary file
+        os.remove(file_path)
+        
+        await safe_reply(update, context, f"ተሳክቷል! {inserted_count} ደንበኞች ተጨምረዋል።")
+        # Optionally export the updated database to CSV for backup
+        export_to_csv(conn)
+        
+    except Exception as e:
+        logger.error(f"Error importing customers from CSV: {e}")
+        await safe_reply(update, context, f"ስህተት ተፈጥሯል፡ {str(e)}")
+    finally:
+        if 'conn' in locals():
+            conn.close()
+    
+    return ConversationHandler.END
+
+async def cancel_import(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Cancel the CSV import process."""
+    context.user_data.clear()
+    await safe_reply(update, context, "የCSV መጨመር ተሰርዟል። እንደገና ለመሞከር /importcustomers ይጠቀሙ።")
+    return ConversationHandler.END
+
 
 def export_to_csv(conn):
     """Export customer data (name, phone, address) to CSV"""
@@ -1682,12 +1755,23 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
     await safe_reply(update, context, "ስራው ተቋርጧል። አዲስ ትዕዛዝ ለመጀመር እባክዎ /start ይጠቀሙ።")
     return ConversationHandler.END
-
+IMPORT_CSV=99
 def main():
     try:
         setup_database()
         
         application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+
+        import_conv = ConversationHandler(
+        entry_points=[CommandHandler("importcustomers", import_customers)],
+        states={
+            IMPORT_CSV: [
+                MessageHandler(filters.Document.ALL, handle_csv_import),
+            ],
+        },
+        fallbacks=[CommandHandler("cancel", cancel_import)],
+    )
+        application.add_handler(import_conv)
         
         add_customer_conv = ConversationHandler(
             entry_points=[CommandHandler('add_customer', add_customer_start)],
